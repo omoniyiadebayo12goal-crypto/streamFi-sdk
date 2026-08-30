@@ -17,6 +17,8 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 - Direct unit tests for `resolvePassphrase()` covering explicit passphrase present/blank, named network known/unknown, and neither-provided branches (#462)
 - `StreamsModule.forceCancel()` — wraps the contract's `force_cancel()` so a recipient can force-cancel a stream paused beyond the 30-day threshold (previously only a prose TODO; `StreamErrorCode.PauseThresholdNotMet` is now reachable through the SDK) (#453)
 - `StreamsModule.transferRecipient()` — wraps the contract's `transfer_recipient()` so the current recipient can reassign the recipient role (previously only a prose TODO) (#454)
+- `NonceManager` (the bigint-based, queue-with-cancellation implementation) is now exported from the package entry point, along with its `NonceLock`/`NonceManagerOptions` types. Previously neither `NonceManager` implementation was reachable outside SDK source (#483).
+- `subscribeToStream()` / `client.streams.subscribe()` now accept `maxBackoffMs` and `maxConsecutiveFailures` options controlling the new exponential-backoff-with-cutoff polling behaviour (#485).
 
 ### Performance
 - `FactoryModule.streamAddress()` now caches resolved stream→contract-address lookups in-memory, since the mapping is fixed at stream creation and never changes. Eliminates redundant RPC round trips on every `StreamsModule` read/write operation (`get`, `withdraw`, `cancel`, `pause`, `resume`, `topUp`, `clawback`) and on each page of `list()`, which previously re-resolved the same address for every stream on every call.
@@ -29,9 +31,7 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ### Removed
 - Removed orphaned `RoomManager` (`src/room-manager.js`) and `src/server.js` WebSocket server, along with unused `dotenv` production dependency (#442).
 - Removed unused `GraphSyncAgent` (`src/graph-sync-agent.ts`) dead code (#443).
-
-- Removed the superseded `src/nonce-manager.ts` `NonceManager` (and its test) — it was an earlier, unmaintained number-based implementation shadowed by the bigint-based `src/nonce/NonceManager.ts` (#444).
-
+- **Breaking (internal only — never exported):** Removed the duplicate, number-based `NonceManager` (`src/nonce-manager.ts`), which stored nonces as a JS `number` and so couldn't represent Stellar int64 sequence numbers above 2^53. `src/nonce/NonceManager.ts`'s bigint-based implementation is now the only `NonceManager` and is exported from the package entry point (#483).
 - Removed dead `Module46` string-normalization wrapper (`src/module46.ts`) — never exported from `src/index.ts` and unreferenced elsewhere (#478).
 
 
@@ -42,13 +42,14 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 - Added a "Wallet Adapters" API reference section documenting `KeypairWalletAdapter`.
 - Documented `StreamBuilder.ratePerSecond()` and `StreamBuilder.submit()` (with full `SubmitOptions`) in `docs/api.md`, previously omitted from the Fluent Builder reference (#463).
 - Documented `ConduitClient`'s `pauseStream()`, `unpauseStream()`, and `setWallet()` convenience methods in `docs/api.md`, and fixed `setWallet()`'s JSDoc block, which had been orphaned above `pauseStream()`/`unpauseStream()` and left `setWallet()` itself undocumented.
+- Documented `subscribe()`'s `onError`, `maxBackoffMs`, and `maxConsecutiveFailures` options and the `getLatestLedger()`-seeded first poll in `docs/api.md` (#484, #485), and removed the stale "internal, not exported" note from the `NonceManager` reference now that it's a public export (#483).
 - Removed the stale duplicate `## Configuration` heading in `README.md` (renamed the environment-variables section to `## Environment Variables`), the non-existent `src/contracts/*-abi.ts` entries and `rollup.config.ts` (actual file is `rollup.config.mjs`) from "Directory Structure", and the Quickstart snippet that logged a raw stroops `bigint` labelled `'USDC'`. Replaced the "companion `@conduit-protocol/react` package (coming in v0.2)" claim — `@streamfi/react` (`packages/react`) already ships `StreamFiProvider`/`useStream`/`useCreateStream`/`useStreamFiClient` — with an accurate usage example, and removed the correspondingly stale `### Planned` changelog entries below. Bumped `package.json`'s `version` from `0.1.0` to `0.2.0` to match the already-released `[0.2.0]` entry below it (#495).
 - Documented `StreamBuilder.startTime()`/`endTime()`/`clawbackEnabled()`/`toContractArgs()`/`toBatchOperation()` in `docs/api.md`, and added a note under `ConduitBatcher` clarifying that `execute()` alone cannot build a real `create_stream` invocation (#435).
 
 ### Fixed
-
-- `StreamsModule.estimateFee()` now returns `FeeEstimate` fees as bigint stroops — consistent with `FeeEstimator` and the rest of the SDK — eliminating IEEE-754 precision loss on large resource fees (#447)
-
+- `subscribeToStream()` (`client.streams.subscribe()`) now seeds `startLedger` from `server.getLatestLedger()` before its first `getEvents()` call. Previously the first poll omitted `startLedger` entirely (it started at `0` and was only included once `> 0`), so Soroban RPC's `getEvents` rejected every call, the rejection was swallowed, and the subscription never delivered a single event (#484).
+- `subscribeToStream()` now backs off exponentially (`pollInterval * 2^(consecutiveFailures - 1)`, capped at the new `maxBackoffMs`) after consecutive polling failures instead of retrying at a fixed interval forever, and stops polling once `maxConsecutiveFailures` consecutive failures have occurred instead of spinning against a permanently-broken RPC endpoint indefinitely (#485).
+- `Module36` and `Module48` no longer each maintain their own copy of the "open-ended stream progress (`NaN`) → `0.5`" normalization. It's now a single shared `normalizeProgress()` in `src/utils.ts`, closing the gap where the two modules' progress calculations could in principle drift out of sync at the edges (#482).
 - `Module26`, `Module36`, `Module48`, and `Module49` now share a single `LruMemoCache` helper (`src/lru-memo-cache.ts`) for eviction (and, for the first three, hit/miss speedup measurement) instead of each re-implementing the same LRU-memoizer logic (#479).
 - `Module26.aggregatePortfolio()` now fingerprints the portfolio with two incremental hashes (FNV-1a + djb2) instead of building a full `items.map(...).join('|')` string on every call, including cache hits — for a large portfolio that string could run to many KB and dominated the "cached" path, so `measuredSpeedupPercent` mostly measured string building rather than the aggregation it memoizes. Two independent hashes are combined into the key rather than one, since a single 32-bit hash would make wrong-portfolio cache collisions realistic at long-running-instance scale (#480).
 - `Module48.processSingleItem()` now updates `totalProcessed` and the execution-time accumulator on every call, so `getPerformanceMetrics().averageExecutionTimeMs` is accurate whether streams are processed via `processStreamBatch()` or by calling `processSingleItem()` directly; previously only `processStreamBatch()` touched `totalProcessed`, so direct `processSingleItem()` calls always reported `averageExecutionTimeMs: 0` (#481).

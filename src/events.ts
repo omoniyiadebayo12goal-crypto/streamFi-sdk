@@ -81,13 +81,15 @@ export function subscribeToStream(
   streamAddress: string,
   handlers:      StreamEventHandlers,
 ): Subscription {
-  const server       = createRpcServer(rpcUrl);
-  const pollInterval = handlers.pollInterval ?? 5000;
-  const maxBackoffMs = handlers.maxBackoffMs ?? 60_000;
+  const server                 = createRpcServer(rpcUrl);
+  const pollInterval           = handlers.pollInterval ?? 5000;
+  const maxBackoffMs           = handlers.maxBackoffMs ?? 60_000;
   const maxConsecutiveFailures = handlers.maxConsecutiveFailures ?? 10;
-  let   startLedger  = 0;  // seeded from getLatestLedger() before the first poll
+  let   startLedger            = 0;
+  let   ledgerSeeded           = false; // true once startLedger holds a real ledger sequence
   let   cursor: string | undefined;
-  let   stopped      = false;
+  let   consecutiveFailures    = 0;
+  let   stopped                = false;
   let   timer: ReturnType<typeof setTimeout> | undefined;
   let   consecutiveFailures = 0;
   // Last per-contract event sequence seen (topics[2]), for gap detection
@@ -98,13 +100,16 @@ export function subscribeToStream(
     if (stopped) return;
 
     try {
-      // Soroban RPC's `getEvents` rejects a request that has neither a
-      // `cursor` nor a `startLedger`. Seed `startLedger` from the current
-      // ledger before the first poll; if this seed itself fails it surfaces
-      // as a polling failure and is retried on the next poll.
-      if (!cursor && startLedger === 0) {
+      if (!ledgerSeeded && !cursor) {
+        // Soroban RPC's getEvents requires a start ledger; the very first
+        // call has no cursor to derive one from yet, so seed it from the
+        // chain's current ledger. If this itself fails, fall through to the
+        // outer catch (below) and retry on the next poll instead of leaving
+        // startLedger at 0 forever, which would make every getEvents call
+        // fail identically (see #484).
         const latest = await server.getLatestLedger();
         startLedger = latest.sequence;
+        ledgerSeeded = true;
       }
 
       const response = await server.getEvents({
@@ -145,13 +150,14 @@ export function subscribeToStream(
           startLedger = response.latestLedger + 1;
         }
       }
+
+      consecutiveFailures = 0;
     } catch (err) {
+      // Swallow polling errors; the subscription continues (unless the
+      // consecutive-failure cutoff below is reached).
       const error = err instanceof Error ? err : new Error(String(err));
+      console.warn('[conduit-sdk] event polling error:', error);
       consecutiveFailures++;
-      console.warn(
-        `[conduit-sdk] event polling error (failure ${consecutiveFailures}):`,
-        error,
-      );
 
       // A consumer error handler must not itself stop future polling.
       try {
@@ -160,9 +166,7 @@ export function subscribeToStream(
         console.warn('[conduit-sdk] event polling onError handler error:', handlerError);
       }
 
-      // Give up against a permanently-broken endpoint rather than retrying
-      // at a fixed interval forever.
-      if (maxConsecutiveFailures > 0 && consecutiveFailures >= maxConsecutiveFailures) {
+      if (consecutiveFailures >= maxConsecutiveFailures) {
         console.warn(
           `[conduit-sdk] event polling stopped after ${consecutiveFailures} consecutive failures`,
         );
@@ -172,11 +176,13 @@ export function subscribeToStream(
     }
 
     if (!stopped) {
-      // Exponential backoff while failures persist; a successful poll resets
-      // `consecutiveFailures` to 0, so this is just `pollInterval` in steady state.
-      const delay = consecutiveFailures === 0
-        ? pollInterval
-        : Math.min(pollInterval * 2 ** (consecutiveFailures - 1), maxBackoffMs);
+      // Exponential backoff: 1x pollInterval after the 1st consecutive
+      // failure, 2x after the 2nd, 4x after the 3rd, etc., capped at
+      // maxBackoffMs. A successful poll resets consecutiveFailures to 0,
+      // which brings the delay back down to the plain pollInterval.
+      const delay = consecutiveFailures > 0
+        ? Math.min(pollInterval * 2 ** (consecutiveFailures - 1), maxBackoffMs)
+        : pollInterval;
       timer = setTimeout(poll, delay);
     }
   }

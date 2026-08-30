@@ -8,9 +8,9 @@ describe('NonceManager public export', () => {
     const lock = await manager.acquire();
 
     // The bigint-based `src/nonce/NonceManager.ts` implementation hands out
-    // `bigint` nonces; the removed number-based `src/nonce-manager.ts`
-    // duplicate could not represent Stellar int64 sequence numbers above 2^53
-    // and exposed no `acquire()`/`release()` API.
+    // `bigint` nonces; the number-based `src/nonce-manager.ts` duplicate
+    // (which cannot represent Stellar int64 sequence numbers above 2^53)
+    // does not expose `acquire()`/`release()` at all.
     expect(typeof lock.nonce).toBe('bigint');
     expect(lock.nonce).toBe(0n);
 

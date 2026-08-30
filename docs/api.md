@@ -203,10 +203,10 @@ const sub = client.streams.subscribe(streamId, {
   onResume:    e => console.log('Resumed at:', e.resumedAt),
   onTopUp:     e => console.log('Topped up:', e.amount),
   onClawback:  e => console.log('Clawback:', e.amount),
-  onError:     err => console.warn('poll failed:', err),
-  pollInterval: 3000,          // ms; default 5000
-  maxBackoffMs: 60_000,        // cap on exponential backoff after failures; default 60_000
-  maxConsecutiveFailures: 10,  // stop polling after this many failures in a row; default 10 (0 = never)
+  onError:     err => console.warn('Polling error:', err),
+  pollInterval:            3000,   // ms; default 5000
+  maxBackoffMs:            30000,  // ms; default 60000
+  maxConsecutiveFailures:  5,      // default 10
 });
 
 sub.unsubscribe();
@@ -226,6 +226,17 @@ sub.unsubscribe();
 > Single-field events are decoded from their bare scalar: `onResume` → `{ sender, resumedAt }`,
 > `onClawback` → `{ sender, amount }`. These fields are real values from the chain — no
 > placeholder `0`/`0n` values remain.
+
+The first poll seeds its start ledger from `getLatestLedger()` before calling `getEvents()` (Soroban
+RPC's `getEvents` rejects without a start ledger). If that seeding call itself fails, it's retried on
+the next poll rather than leaving the subscription permanently unable to seed a cursor.
+
+A polling failure calls `onError` and reschedules the next poll with exponential backoff —
+`pollInterval * 2^(consecutiveFailures - 1)`, capped at `maxBackoffMs` — instead of retrying at a
+fixed interval. A successful poll resets the failure count and the delay back to `pollInterval`. If
+`maxConsecutiveFailures` consecutive polls fail in a row, the subscription stops polling entirely
+(after the final `onError` call for that failure) rather than retrying forever against a dead
+endpoint; call `subscribe()` again to restart it.
 
 ---
 
@@ -655,12 +666,7 @@ still consumed sequentially even though simulation itself is not.
 
 ---
 
-## `NonceManager` (`src/nonce/NonceManager.ts`)
-
-Exported from the package entry point (`src/index.ts`) alongside its `NonceLock` and
-`NonceManagerOptions` types. This is the bigint-based implementation; the earlier
-`number`-based `src/nonce-manager.ts` duplicate (which could not represent Stellar
-int64 sequence numbers above 2^53) has been removed.
+## `NonceManager`
 
 ```typescript
 const nonces = new NonceManager({ startNonce: 0n, maxNonce: 1_000_000n });

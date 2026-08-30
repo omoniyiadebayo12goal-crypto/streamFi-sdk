@@ -140,22 +140,25 @@ export interface StreamEventHandlers {
   onResume?:   (e: ResumeEvent)    => void;
   onTopUp?:    (e: TopUpEvent)     => void;
   onClawback?: (e: ClawbackEvent)  => void;
-  /** Called when an event polling request fails. Polling continues afterward. */
+  /**
+   * Called when an event polling request fails. Polling continues
+   * afterward — unless this failure reaches `maxConsecutiveFailures`, in
+   * which case this is the last call before the subscription stops.
+   */
   onError?:    (error: Error)      => void;
   /** Called when a non-contiguous event sequence is observed (missed events across a poll gap or reconnect). */
   onGap?:      (gap: EventGap)     => void;
   /** Polling interval in ms; default 5000 */
   pollInterval?: number;
   /**
-   * Upper bound (ms) on the exponential backoff applied after consecutive
-   * polling failures. Default 60000. The delay is
-   * `min(pollInterval * 2^(failures - 1), maxBackoffMs)`.
+   * Upper bound (ms) for the exponential backoff delay applied between
+   * retries after consecutive polling failures. Default 60000.
    */
   maxBackoffMs?: number;
   /**
    * Number of consecutive polling failures after which the subscription
-   * stops polling entirely (a final `onError` is delivered first). Default 10.
-   * Set to 0 to poll forever regardless of failures.
+   * gives up and stops polling (the timer is not rescheduled). A
+   * successful poll resets the counter. Default 10.
    */
   maxConsecutiveFailures?: number;
 }

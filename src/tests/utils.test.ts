@@ -200,9 +200,10 @@ describe('streamProgress', () => {
 });
 
 // ── normalizeProgress ────────────────────────────────────────────────────────
-// Module36 and Module48 both need streamProgress()'s NaN (open-ended, already
-// started) result turned into a defined midpoint. This must be one shared
-// helper (see #482), not two independent reimplementations that can drift.
+// Module36 and Module48 both need to turn streamProgress()'s NaN
+// (open-ended, already-started) result into a defined midpoint value.
+// This must be a single shared helper — see #482 — not two independent
+// reimplementations that can drift out of sync at the edges.
 
 describe('normalizeProgress', () => {
   it('maps NaN to the midpoint 0.5', () => {
